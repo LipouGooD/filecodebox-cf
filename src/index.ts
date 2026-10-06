@@ -20,6 +20,10 @@ import {
   cleanExpiredFiles,
   findCode,
   buildFileMetadata,
+  presignInit,
+  presignProxyUpload,
+  presignStatus,
+  presignCancel,
 } from "./share";
 import {
   login,
@@ -149,9 +153,36 @@ async function route(request: Request, env: Env, path: string, url: URL): Promis
     return routeAdmin(request, env, config, path, url);
   }
 
-  // 原版支持但 CF 迁移版不提供的功能
-  if (path.startsWith("/chunk") || path.startsWith("/presign")) {
-    return errorResponse(404, "分片/预签名上传在 Cloudflare 迁移版不可用");
+  // ---- 预签名上传（proxy 模式）----
+  if (path === "/presign/upload/init" && request.method === "POST") {
+    await guardUpload(config, request);
+    const body = (await request.json().catch(() => ({}))) as {
+      file_name?: string;
+      file_size?: number;
+      expire_value?: number;
+      expire_style?: string;
+    };
+    return presignInit(env, config, body);
+  }
+  const presignProxyMatch = path.match(/^\/presign\/upload\/proxy\/([^/]+)$/);
+  if (presignProxyMatch && request.method === "PUT") {
+    await guardUpload(config, request);
+    return presignProxyUpload(env, config, presignProxyMatch[1], request);
+  }
+  const presignStatusMatch = path.match(/^\/presign\/upload\/status\/([^/]+)$/);
+  if (presignStatusMatch && request.method === "GET") {
+    await guardUpload(config, request);
+    return presignStatus(env, presignStatusMatch[1]);
+  }
+  const presignCancelMatch = path.match(/^\/presign\/upload\/([^/]+)$/);
+  if (presignCancelMatch && request.method === "DELETE") {
+    await guardUpload(config, request);
+    return presignCancel(env, presignCancelMatch[1]);
+  }
+
+  // 原版支持但 CF 迁移版不提供的功能（分片上传：前端 enable_chunk=0 时不调用）
+  if (path.startsWith("/chunk")) {
+    return errorResponse(404, "分片上传在 Cloudflare 迁移版不可用");
   }
 
   return errorResponse(404, "资源不存在");

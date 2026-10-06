@@ -302,6 +302,171 @@ export async function downloadWithToken(
   return selectDownload(env, config, code);
 }
 
+// ---------- 预签名上传（proxy 模式，对齐原版 apps/base/views.py presign_api）----------
+// R2 binding 无法生成外部可用的预签名直传 URL，故统一走 proxy：init 建会话 → PUT 转存 → 返回取件码
+
+const PRESIGN_SESSION_EXPIRES_SEC = 900; // 与原版一致：15 分钟
+
+interface PresignSession {
+  file_name: string;
+  file_size: number;
+  file_path: string;
+  save_path: string;
+  expire_value: number;
+  expire_style: string;
+  created_at: number;
+}
+
+function sessionKey(uploadId: string): string {
+  return `presign:${uploadId}`;
+}
+
+async function loadPresignSession(env: Env, uploadId: string): Promise<PresignSession | null> {
+  const row = await env.FILEBOX_DB.prepare("SELECT value FROM key_value WHERE key = ? LIMIT 1")
+    .bind(sessionKey(uploadId))
+    .first<{ value: string }>();
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as PresignSession;
+  } catch {
+    return null;
+  }
+}
+
+async function savePresignSession(env: Env, uploadId: string, session: PresignSession): Promise<void> {
+  await env.FILEBOX_DB.prepare(
+    "INSERT INTO key_value(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  )
+    .bind(sessionKey(uploadId), JSON.stringify(session))
+    .run();
+}
+
+async function deletePresignSession(env: Env, uploadId: string): Promise<void> {
+  await env.FILEBOX_DB.prepare("DELETE FROM key_value WHERE key = ?").bind(sessionKey(uploadId)).run();
+}
+
+/** POST /presign/upload/init：创建上传会话（始终返回 proxy 模式） */
+export async function presignInit(
+  env: Env,
+  config: SiteConfig,
+  body: { file_name?: string; file_size?: number; expire_value?: number; expire_style?: string }
+): Promise<Response> {
+  const fileName = sanitizeFilename(String(body.file_name || ""));
+  if (!fileName) return errorResponse(400, "缺少文件名称");
+  const fileSize = Number(body.file_size || 0);
+  if (fileSize <= 0) return errorResponse(400, "文件大小错误");
+  const expireValue = Number(body.expire_value || 1);
+  const expireStyle = String(body.expire_style || "day");
+  validateExpireStyle(config, expireStyle);
+  validateFileType(config, fileName);
+
+  const maxSize = Number(config.upload_size);
+  if (fileSize > maxSize) {
+    return errorResponse(403, `文件大小超过限制,最大为${(maxSize / (1024 * 1024)).toFixed(2)} MB`);
+  }
+
+  const uploadId = crypto.randomUUID().replace(/-/g, "");
+  const filePath = `share/data/${todayPath()}/${uploadId}`;
+  const savePath = `${filePath}/${fileName}`;
+  await savePresignSession(env, uploadId, {
+    file_name: fileName,
+    file_size: fileSize,
+    file_path: filePath,
+    save_path: savePath,
+    expire_value: expireValue,
+    expire_style: expireStyle,
+    created_at: nowMs(),
+  });
+
+  const proxyUploadUrl = `/presign/upload/proxy/${uploadId}`;
+  return okResponse({
+    upload_id: uploadId,
+    upload_url: proxyUploadUrl,
+    mode: "proxy",
+    expires_in: PRESIGN_SESSION_EXPIRES_SEC,
+    proxy_upload_url: proxyUploadUrl,
+    legacy_proxy_upload_url: `/api${proxyUploadUrl}`,
+  });
+}
+
+/** PUT /presign/upload/proxy/{upload_id}：代理转存文件并创建分享记录 */
+export async function presignProxyUpload(
+  env: Env,
+  config: SiteConfig,
+  uploadId: string,
+  request: Request
+): Promise<Response> {
+  const session = await loadPresignSession(env, uploadId);
+  if (!session) return errorResponse(404, "上传会话不存在或已过期");
+  if (nowMs() - session.created_at > PRESIGN_SESSION_EXPIRES_SEC * 1000) {
+    await deletePresignSession(env, uploadId);
+    return errorResponse(404, "上传会话不存在或已过期");
+  }
+
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File)) return errorResponse(400, "缺少文件字段");
+  const maxSize = Number(config.upload_size);
+  if (file.size > maxSize) {
+    return errorResponse(403, `大小超过限制,最大为${(maxSize / (1024 * 1024)).toFixed(2)} MB`);
+  }
+
+  const fileName = session.file_name;
+  await env.FILEBOX_FILES.put(session.save_path, file.stream(), {
+    httpMetadata: { contentType: file.type || "application/octet-stream" },
+  });
+
+  const { expiredAt, expiredCount, usedCount } = getExpireInfo(
+    session.expire_value,
+    session.expire_style,
+    Number(config.max_save_seconds)
+  );
+  const code = await generateUniqueCode(env, String(config.code_generate_type));
+  const [prefix, suffix] = splitExt(fileName);
+  try {
+    await insertFileCode(env, {
+      code,
+      prefix,
+      suffix,
+      uuid_file_name: fileName,
+      file_path: session.file_path,
+      size: file.size,
+      text: null,
+      expired_at: expiredAt,
+      expired_count: expiredCount,
+    });
+  } catch (e) {
+    await env.FILEBOX_FILES.delete(session.save_path).catch(() => undefined);
+    throw e;
+  }
+  await deletePresignSession(env, uploadId);
+  return okResponse({ code, name: fileName });
+}
+
+/** GET /presign/upload/status/{upload_id}：查询会话状态 */
+export async function presignStatus(env: Env, uploadId: string): Promise<Response> {
+  const session = await loadPresignSession(env, uploadId);
+  if (!session) return errorResponse(404, "上传会话不存在");
+  const isExpired = nowMs() - session.created_at > PRESIGN_SESSION_EXPIRES_SEC * 1000;
+  return okResponse({
+    upload_id: uploadId,
+    file_name: session.file_name,
+    file_size: session.file_size,
+    mode: "proxy",
+    created_at: new Date(session.created_at).toISOString(),
+    expires_at: new Date(session.created_at + PRESIGN_SESSION_EXPIRES_SEC * 1000).toISOString(),
+    is_expired: isExpired,
+  });
+}
+
+/** DELETE /presign/upload/{upload_id}：取消会话 */
+export async function presignCancel(env: Env, uploadId: string): Promise<Response> {
+  const session = await loadPresignSession(env, uploadId);
+  if (!session) return errorResponse(404, "上传会话不存在");
+  await deletePresignSession(env, uploadId);
+  return okResponse({ message: "上传会话已取消" });
+}
+
 // ---------- 定时清理（对齐 tasks.delete_expire_files） ----------
 
 export async function cleanExpiredFiles(env: Env): Promise<{ removed: number; freed: number }> {

@@ -120,7 +120,8 @@ export function getExpireInfo(
   maxSaveSeconds: number
 ): { expiredAt: string | null; expiredCount: number; usedCount: number } {
   const now = Date.now();
-  const maxSave = maxSaveSeconds > 0 ? maxSaveSeconds : 7 * 24 * 3600 * 1000;
+  // 原版 settings.max_save_seconds 单位为秒；0 = 不限，默认 7 天上限
+  const maxSave = maxSaveSeconds > 0 ? maxSaveSeconds * 1000 : 7 * 24 * 3600 * 1000;
 
   let expiredAt: string | null = null;
   let expiredCount = -1;
