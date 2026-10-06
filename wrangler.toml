@@ -1,0 +1,25 @@
+name = "filecodebox-cf"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# 前端静态资源：构建后的 dist 复制到 ./assets 目录。
+# 默认行为：请求先尝试匹配静态资源，未命中才进入 Worker（API 路径 /share、/admin 等）
+assets = { directory = "./assets", not_found_handling = "none" }
+
+# D1 数据库（存分享记录与站点配置）
+[[d1_databases]]
+binding = "FILEBOX_DB"
+database_name = "filecodebox"
+# 创建 D1 数据库后替换为真实 ID：
+#   wrangler d1 create filecodebox
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# R2 存储桶（存上传的文件本体）
+[[r2_buckets]]
+binding = "FILEBOX_FILES"
+bucket_name = "filecodebox-files"
+
+# 定时清理过期文件（每天凌晨 3 点 UTC）
+[triggers]
+crons = ["0 3 * * *"]

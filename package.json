@@ -1,0 +1,19 @@
+{
+  "name": "filecodebox-cf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FileCodeBox 迁移到 Cloudflare Workers + D1 + R2",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "db:init": "wrangler d1 execute filecodebox --remote --file=./migrations/0001_init.sql",
+    "db:init:local": "wrangler d1 execute filecodebox --local --file=./migrations/0001_init.sql"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.0",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.147.0"
+  }
+}
