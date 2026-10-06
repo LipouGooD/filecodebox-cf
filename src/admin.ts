@@ -11,7 +11,7 @@ import {
   hashPassword,
   verifyPassword,
 } from "./config";
-import { createToken, requireAdmin } from "./auth";
+import { createToken, requireAdmin, extractBearerToken } from "./auth";
 import { errorResponse, okResponse } from "./respond";
 import { FileCodeRow, findCode } from "./share";
 import { isExpired, ShareError } from "./util";
@@ -68,8 +68,17 @@ function base64urlBytes(input: string): Uint8Array {
 }
 
 export async function verify(env: Env, config: SiteConfig, authorization: string | null): Promise<Response> {
+  // 前端 verifySession 要求响应 detail.token 存在才延续会话，因此回传原 token（对齐登录响应结构）
+  const token = extractBearerToken(authorization);
   const payload = await requireAdmin(String(config.jwt_secret), authorization);
-  return okResponse(payload);
+  return okResponse({
+    id: "admin",
+    username: "admin",
+    token,
+    token_type: "Bearer",
+    expires_at: payload.exp,
+    expires_in: normalizeSessionExpire(Number(config.admin_session_expire)),
+  });
 }
 
 // ---------- 仪表盘（简化版，字段对齐原版） ----------
