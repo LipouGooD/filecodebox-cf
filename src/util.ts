@@ -105,9 +105,12 @@ export function compareDigest(a: string, b: string): boolean {
   return diff === 0;
 }
 
-/** 下载鉴权 token：sha256(code + timeFactor + "000" + jwt_secret)，窗口约 1000 秒 */
+/** 下载鉴权 token：sha256(code + timeFactor + "000" + jwt_secret)。
+ * 与原版一致：timeFactor = epoch秒 / 1000（窗口约 1000 秒），offset 校验上一个窗口，
+ * 实际有效约 33 分钟，避免用户查看详情后再点击下载时 key 过期。
+ */
 export async function getSelectToken(code: string, secret: string, offset = 0): Promise<string> {
-  const timeFactor = Math.floor(Date.now() / 1000) - Math.max(0, offset);
+  const timeFactor = Math.floor(Date.now() / 1000 / 1000) - Math.max(0, offset);
   return sha256Hex(`${code}${timeFactor}000${secret}`);
 }
 
